@@ -51,6 +51,7 @@ uint16_t next_ocr1a = 0, next_ocr1b = 0;
 volatile bool blink = false;
 volatile bool button[4];
 volatile uint8_t bl_delay = 0;
+#define BL_DELAY 30
 enum {HOME, SETUP, CHANNEL, KVAL, ETC};
 uint16_t humidity;
 int16_t temperature;
@@ -67,9 +68,13 @@ const char str_buttons[] PROGMEM = "Back Sel Up Dn";
 #define P_ON_M
 uint8_t Kp = 90, Ki = 1, Kd = 10, dT = 2;
 uint8_t EEMEM nvKp, nvKi, nvKd, nvdT;
-enum {ON, OFF, AUTO};
-uint8_t bl_mode = AUTO;
-uint8_t EEMEM nv_bl_mode;
+volatile uint8_t sample_delay = 0, on_off_delay = 0;
+#define ON_OFF_DELAY 30
+uint8_t on_off_thres = 15;
+uint8_t EEMEM nv_on_off_thres;
+enum {OFF, ON, AUTO};
+uint8_t bl_mode = AUTO, contrast = 60;
+uint8_t EEMEM nv_bl_mode, nv_contrast;
 
 #define button_init() PORTC |= _BV(PC0) | _BV(PC1) | _BV(PC2) | _BV(PC3)
 #define constrain(amt,low,high) ((amt)<(low)?(low):((amt)>(high)?(high):(amt)))
@@ -95,8 +100,8 @@ ISR(TIMER0_OVF_vect) {
 		}
 		// Signal button push after 20,5 ms or every 262 ms when pushed longer then 524 ms
 		if (push[pin] == 10 || (hold[pin] && push[pin] == 138)) {
-			button[pin] = true;
-			bl_delay = 255;
+			if (bl_delay || bl_mode != AUTO) button[pin] = true;
+			bl_delay = BL_DELAY;
 		}
 	}
 }
@@ -111,6 +116,7 @@ static void timer2_init(void) {
 }
 
 ISR(TIMER2_OVF_vect) {
+	// Time keeping
 	if (++time_sec > 59) {
 		time_sec = 0;
 		if (++time_min > 59) {
@@ -118,6 +124,10 @@ ISR(TIMER2_OVF_vect) {
 			if (++time_hour > 23) time_hour = 0;
 		}
 	}
+	// Decrement counters
+	if (bl_delay) bl_delay--;
+	if (sample_delay) sample_delay--;
+	if (on_off_delay) on_off_delay--;
 }
 
 static void calibrate(void) {
@@ -152,7 +162,6 @@ static void timer1_init(void) {
 	TCCR1A = 0; // Normal operation
 	// Input capture noise cancel, positive edge, /8 prescaler
 	TCCR1B = _BV(ICNC1) | _BV(ICES1) | _BV(CS11);
-	PINB |= _BV(PB0); // Enable pull up on ICP1
 	TIFR1 = 0xFF; // Clear interrupt flags
 	TCNT1 = 0; // Reset timer
 	// Enable input capture and compare match interrupts
@@ -204,8 +213,7 @@ static char *itostr(int16_t num, char *str, uint8_t decimal, uint8_t padding) {
 	while (i < padding) str[i++] = '0';
 	if (num < 0) str[i++] = '-';
 	str[i] = '\0';
-	strrev(str);
-	return str;
+	return strrev(str);
 }
 
 static bool is_daytime(void) {
@@ -215,21 +223,11 @@ static bool is_daytime(void) {
 }
 
 static uint8_t home(void) {
-	if (button[3]) {
-		button[3] = false;
-		return SETUP;
-	}
-	if (button[2]) {
-		button[2] = false;
-		return CHANNEL;
-	}
-	if (button[1]) {
-		button[1] = false;
-		return KVAL;
-	}
-	if (button[0]) {
-		button[0] = false;
-		return ETC;
+	for (uint8_t i = 0; i < 4; i++) {
+		if (button[i]) {
+			button[i] = false;
+			return 4 - i;
+		}
 	}
 	pcd8544_clear();
 	pcd8544_write_string(itostr(ch0_dim, buffer, 0, 1), 1);
@@ -244,25 +242,28 @@ static uint8_t home(void) {
 	buffer[2] = time_sec % 2 ? ':' : ' ';
 	itostr(time_min, &buffer[3], 0, 2);
 	pcd8544_write_string(buffer, 1);
-	if (sensor == 0) {
-		pcd8544_set_cursor(temperature < 0 ? 0 : 12, 8);
-		pcd8544_write_string(itostr(temperature, buffer, 1, 2), 2);
-		pcd8544_write_string_P("\x7f\x43", 2);
-		pcd8544_set_cursor(12, 24);
-		pcd8544_write_string(itostr(humidity, buffer, 1, 2), 2);
-		pcd8544_write_char('%', 2);
-	} else if (sensor == 1) {
-		pcd8544_write_string_P("\nNo response", 1);
-	} else if (sensor == 2) {
-		pcd8544_write_string_P("\nCRC error", 1);
+	switch (sensor) {
+		case 0:
+			pcd8544_set_cursor(temperature < 0 ? 0 : 12, 8);
+			pcd8544_write_string(itostr(temperature, buffer, 1, 2), 2);
+			pcd8544_write_string_P("\x7f\x43", 2);
+			pcd8544_set_cursor(12, 24);
+			pcd8544_write_string(itostr(humidity, buffer, 1, 2), 2);
+			pcd8544_write_char('%', 2);
+			break;
+		case 1:
+			pcd8544_write_string_P("\nNo response", 1);
+			break;
+		case 2:
+			pcd8544_write_string_P("\nCRC error", 1);
 	}
 	pcd8544_set_cursor(0, 40);
-	pcd8544_write_string_P("Set Ch Pid Etc", 1);
+	pcd8544_write_string_P("Set Ch Pid Lcd", 1);
 	pcd8544_update();
 	return HOME;
 }
 
-void eeprom_save(void) {
+static void eeprom_save(void) {
 	eeprom_update_byte(&nv_magic, 0x55);
 	eeprom_update_byte(&nv_ch0_auto, ch0_auto);
 	eeprom_update_byte(&nv_ch0_dim, ch0_dim);
@@ -281,6 +282,8 @@ void eeprom_save(void) {
 	eeprom_update_byte(&nvKd, Kd);
 	eeprom_update_byte(&nvdT, dT);
 	eeprom_update_byte(&nv_bl_mode, bl_mode);
+	eeprom_update_byte(&nv_contrast, contrast);
+	eeprom_update_byte(&nv_on_off_thres, on_off_thres);
 }
 
 static void blink_buffer(void) {
@@ -306,12 +309,15 @@ static uint8_t setup(void) {
 				sub = 1;
 				break;
 			case 1:
-				if (++sub > 3) sub = 1;
+				if (++sub > 3) select = 0;
 				break;
 			case 2:
 			case 3:
-				if (++sub > 2) sub = 1;
+				if (++sub > 2) select = 0;
 				break;
+			case 4:
+			case 5:
+				select = 0;
 		}
 	}
 	if (button[1]) {  // Up
@@ -338,7 +344,6 @@ static uint8_t setup(void) {
 				break;
 			case 5:
 				if (min_temp < 800) max_temp += 5;
-				break;
 		}
 	}
 	if (button[0]) {  // Down
@@ -365,7 +370,6 @@ static uint8_t setup(void) {
 				break;
 			case 5:
 				if (min_temp > -400) max_temp -= 5;
-				break;
 		}
 	}
 	pcd8544_clear();
@@ -425,13 +429,13 @@ static uint8_t channel(void) {
 	}
 	if (button[2]) {  // Select
 		button[2] = false;
-		select = item;
+		select = select ? 0 : item;
 	}
 	if (button[1]) {  // Up
 		button[1] = false;
 		switch (select) {
 			case 0:
-				if (--item == 0) item = 4;
+				if (--item == 0) item = 5;
 				break;
 			case 1:
 				if (ch0_auto) {
@@ -463,13 +467,15 @@ static uint8_t channel(void) {
 				ch1_on_off = !ch1_on_off;
 				if (ch1_on_off) ch1_dim = ch1_dim ? DIM_STEPS : 0;
 				break;
+			case 5:
+				if (++on_off_thres > DIM_STEPS) on_off_thres = 0;
 		}
 	}
 	if (button[0]) {  // Down
 		button[0] = false;
 		switch (select) {
 			case 0:
-				if (++item > 4) item = 1;
+				if (++item > 5) item = 1;
 				break;
 			case 1:
 				if (ch0_auto) {
@@ -501,6 +507,8 @@ static uint8_t channel(void) {
 				ch1_on_off = !ch1_on_off;
 				if (ch1_on_off) ch1_dim = ch1_dim ? DIM_STEPS : 0;
 				break;
+			case 5:
+				if (--on_off_thres > DIM_STEPS) on_off_thres = DIM_STEPS;
 		}
 	}
 	pcd8544_clear();
@@ -530,6 +538,11 @@ static uint8_t channel(void) {
 	strcpy_P(buffer, ch1_on_off ? str_on_off : str_dimming);
 	if (select == 4) blink_buffer();
 	pcd8544_write_string(buffer, inv);
+	inv = item == 5 ? 129 : 1;
+	pcd8544_write_string_P("\nThreshold ", inv);
+	itostr(on_off_thres, buffer, 0, 1);
+	if (select == 5) blink_buffer();
+	pcd8544_write_string(buffer, inv);
 	pcd8544_set_cursor(0, 40);
 	pcd8544_write_string_p(str_buttons, 1);
 	pcd8544_update();
@@ -549,7 +562,7 @@ static uint8_t kval(void) {
 	}
 	if (button[2]) {  // Select
 		button[2] = false;
-		select = item;
+		select = select ? 0 : item;
 	}
 	if (button[1]) {  // Up
 		button[1] = false;
@@ -568,7 +581,6 @@ static uint8_t kval(void) {
 				break;
 			case 4:
 				if (++dT > 59) dT = 0;
-				break;
 		}
 	}
 	if (button[0]) {  // Down
@@ -588,7 +600,6 @@ static uint8_t kval(void) {
 				break;
 			case 4:
 				if (--dT > 59) dT = 59;
-				break;
 		}
 	}
 	pcd8544_clear();
@@ -632,15 +643,35 @@ static uint8_t etc(void) {
 	}
 	if (button[2]) {  // Select
 		button[2] = false;
-		select = item;
+		select = select ? 0 : item;
 	}
 	if (button[1]) {  // Up
 		button[1] = false;
-		if (select == 1) if (++bl_mode > 2) bl_mode = 0;
+		switch (select) {
+			case 0:
+				if (--item == 0) item = 2;
+				break;
+			case 1:
+				if (++bl_mode > 2) bl_mode = 0;
+				break;
+			case 2:
+				if (++contrast > 90) contrast = 90;
+				pcd8544_contrast(contrast);
+		}
 	}
 	if (button[0]) {  // Down
 		button[0] = false;
-		if (select == 1) if (bl_mode-- == 0) bl_mode = 2;
+		switch (select) {
+			case 0:
+				if (++item > 2) item = 1;
+				break;
+			case 1:
+				if (bl_mode-- == 0) bl_mode = 2;
+				break;
+			case 2:
+				if (--contrast < 30) contrast = 30;
+				pcd8544_contrast(contrast);
+		}
 	}
 	pcd8544_clear();
 	uint8_t inv = item == 1 ? 129 : 1;
@@ -652,6 +683,12 @@ static uint8_t etc(void) {
 	else
 		strcpy_P(buffer, PSTR("Off"));
 	if (select == 1) blink_buffer();
+	pcd8544_write_string(buffer, inv);
+	inv = item == 2 ? 129 : 1;
+	pcd8544_set_cursor(0, 8);
+	pcd8544_write_string_P("Contrast ", inv);
+	itostr(contrast, buffer, 0, 1);
+	if (select == 2) blink_buffer();
 	pcd8544_write_string(buffer, inv);
 	pcd8544_set_cursor(0, 40);
 	pcd8544_write_string_p(str_buttons, 1);
@@ -678,11 +715,7 @@ static int16_t pid(int16_t input, int16_t setpoint) {
 	return constrain(output, 0, DIM_STEPS);
 }
 
-static uint8_t diffsec(uint8_t sec1, uint8_t sec0) {
-	return sec1 < sec0 ? sec1 + 60 - sec0 : sec1 - sec0;
-}
-
-void eeprom_init(void) {
+static void eeprom_init(void) {
 	if (eeprom_read_byte(&nv_magic) != 0x55) return;
 	ch0_dim = eeprom_read_byte(&nv_ch0_dim);
 	ch1_dim = eeprom_read_byte(&nv_ch1_dim);
@@ -701,10 +734,12 @@ void eeprom_init(void) {
 	Kd = eeprom_read_byte(&nvKd);
 	dT = eeprom_read_byte(&nvdT);
 	bl_mode = eeprom_read_byte(&nv_bl_mode);
+	contrast = eeprom_read_byte(&nv_contrast);
+	on_off_thres = eeprom_read_byte(&nv_on_off_thres);
 }
 
 int main(void) {
-	uint8_t view = HOME, prev_sec = 0;
+	uint8_t view = HOME, prev_on_off = 0;
 	eeprom_init();
 	pcd8544_init();
 	pcd8544_led_on();
@@ -726,19 +761,34 @@ int main(void) {
 		if (view == CHANNEL) view = channel();
 		if (view == KVAL) view = kval();
 		if (view == ETC) view = etc();
-		if (bl_delay) bl_delay--;
 		if (bl_mode == ON || (bl_mode == AUTO && bl_delay))
 			pcd8544_led_on();
 		else
 			pcd8544_led_off();
-		if (diffsec(time_sec, prev_sec) >= dT && prev_sec != time_sec) {
-			prev_sec = time_sec;
+		if (sample_delay == 0) {
+			sample_delay = dT;
 			if ((sensor = am2320_get(&humidity, &temperature))) continue;
 			int16_t setpoint = is_daytime() ? max_temp : min_temp;
 			uint8_t output = pid(temperature, setpoint);
-			uint8_t on_off = temperature < setpoint ? DIM_STEPS : 0;
-			if (ch0_auto) ch0_dim = ch0_on_off ? on_off : output;
-			if (ch1_auto) ch1_dim = ch1_on_off ? on_off : output;
+			uint8_t on_off = output > on_off_thres ? DIM_STEPS : 0;
+			if (on_off != prev_on_off) {
+				prev_on_off = on_off;
+				on_off_delay = ON_OFF_DELAY;
+			}
+			if (ch0_auto) {
+				if (ch0_on_off) {
+					if (on_off_delay == 0) ch0_dim = on_off;
+				} else {
+					ch0_dim = output;
+				}
+			}
+			if (ch1_auto) {
+				if (ch1_on_off) {
+					if (on_off_delay == 0) ch1_dim = on_off;
+				} else {
+					ch1_dim = output;
+				}
+			}
 		}
     }
 }

@@ -45,6 +45,7 @@ typedef enum {
 extern void pcd8544_init(void);
 extern void pcd8544_clear(void);
 extern void pcd8544_power(bool on);
+extern void pcd8544_contrast(uint8_t level);
 extern void pcd8544_display_mode(pcd8544_display_t mode);
 extern void pcd8544_set_pixel(uint8_t x, uint8_t y, uint8_t value);
 extern void pcd8544_write_char(char code, uint8_t scale);

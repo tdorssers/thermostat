@@ -167,7 +167,7 @@ void pcd8544_init(void) {
 	/* -LCD Extended Commands mode- */
 	write_cmd(PCD8544_FUNCTIONSET | PCD8544_EXTENDEDINSTRUCTION);
 	/* LCD bias mode 1:48 */
-	write_cmd(PCD8544_SETBIAS | 0x3);
+	write_cmd(PCD8544_SETBIAS | 0x4);
 	/* Set temperature coefficient */
 	write_cmd(PCD8544_SETTEMP | 0x2);
 	/* Default VOP (3.06 + 60 * 0.06 = 6.66V) */
@@ -186,6 +186,12 @@ void pcd8544_clear(void) {
 
 void pcd8544_power(bool on) {
 	write_cmd(PCD8544_FUNCTIONSET | (on ? PCD8544_POWERUP : PCD8544_POWERDOWN));
+}
+
+void pcd8544_contrast(uint8_t level) {
+	write_cmd(PCD8544_FUNCTIONSET | PCD8544_EXTENDEDINSTRUCTION);
+	write_cmd(PCD8544_SETVOP | (level & 0x7f));
+	write_cmd(PCD8544_FUNCTIONSET | PCD8544_BASICINSTRUCTION | PCD8544_HORIZONTALADDRESS);
 }
 
 void pcd8544_display_mode(pcd8544_display_t mode) {
