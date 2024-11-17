@@ -10,6 +10,7 @@
 #define PCD8544_H_
 
 #include <stdbool.h>
+#include "fonts.h"
 
 #define PCD8544_POWERUP 0x00
 #define PCD8544_POWERDOWN 0x04
@@ -48,9 +49,9 @@ extern void pcd8544_power(bool on);
 extern void pcd8544_contrast(uint8_t level);
 extern void pcd8544_display_mode(pcd8544_display_t mode);
 extern void pcd8544_set_pixel(uint8_t x, uint8_t y, uint8_t value);
-extern void pcd8544_write_char(char code, uint8_t scale);
-extern void pcd8544_write_string(char *str, uint8_t scale);
-extern void pcd8544_write_string_p(const char *str, uint8_t scale);
+extern void pcd8544_write_char(char code, bool inv);
+extern void pcd8544_write_string(char *str, bool inv);
+extern void pcd8544_write_string_p(const char *str, bool inv);
 extern void pcd8544_set_cursor(uint8_t x, uint8_t y);
 extern void pcd8544_update(void);
 extern void pcd8544_draw_hline(uint8_t x, uint8_t y, uint8_t length);
@@ -60,5 +61,6 @@ extern void pcd8544_draw_rect(uint8_t x1, uint8_t y1, uint8_t width, uint8_t hei
 extern void pcd8544_fill_rect(uint8_t x1, uint8_t y1, uint8_t width, uint8_t height);
 extern void pcd8544_draw_circle(uint8_t x1, uint8_t y1, uint8_t r);
 extern void pcd8544_fill_circle(uint8_t x1, uint8_t y1, uint8_t r);
+extern void pcd8544_set_font(const uint8_t *f);
 
 #endif /* PCD8544_H_ */

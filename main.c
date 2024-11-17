@@ -1,14 +1,16 @@
 /*
  * Title   : 2 Channel AC Dimming Thermostat and Timer
  * Hardware: ATmega328P @ 8 MHz, PCD8544 LCD controller,
-  *          AM2320 temperature and humidity sensor
+ *           AHT15/AHT20/AHT21/AHT25 or AM2320 temperature and humidity sensor
  *
  * Created: 06/10/2024 15:21:25
  *  Author: Tim Dorssers
  *
- * This is a graphical menu configured dimming thermostat with two output
- * channels. Each channel can also switch between on and off. The start of
- * daytime and length of day are used to determine day and night temperatures.
+ * This is a graphical menu configurable AC dimming thermostat with two output
+ * channels. Each channel be set to on/off switching. Up to two temperature
+ * sensors are detected automatically. Each channel is controlled individually
+ * when using two sensors. Start of daytime and length of day are used to
+ * determine day and night temperatures.
  * The dimming hardware uses zero-cross detection which gives a positive edge
  * at the end of a half sine wave and a negative edge at the start of a half
  * sine wave on the ICP1 pin. The OC1x pins connect to photo-TRIACs that drive
@@ -34,9 +36,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include "uart.h"
 #include "pcd8544.h"
 #include "am2320.h"
+#include "aht20.h"
+#include "i2c.h"
 
 char buffer[15];
 uint8_t EEMEM nv_magic;
@@ -53,9 +56,9 @@ volatile bool button[4];
 volatile uint8_t bl_delay = 0;
 #define BL_DELAY 30
 enum {HOME, SETUP, CHANNEL, KVAL, ETC};
-uint16_t humidity;
-int16_t temperature;
-uint8_t sensor = 0;
+uint16_t humidity0, humidity1;
+int16_t temperature0, temperature1;
+uint8_t sensor0 = 0, sensor1 = 0;
 uint8_t time_sec = 0, time_min = 0, time_hour = 0;
 uint8_t start_min = 0, start_hour = 8, length_min = 0, length_hour = 10;
 uint8_t EEMEM nv_start_min, nv_start_hour, nv_length_min, nv_length_hour;
@@ -230,35 +233,51 @@ static uint8_t home(void) {
 		}
 	}
 	pcd8544_clear();
-	pcd8544_write_string(itostr(ch0_dim, buffer, 0, 1), 1);
-	pcd8544_write_char('/', 1);
-	pcd8544_write_string(itostr(ch1_dim, buffer, 0, 1), 1);
+	pcd8544_write_string(itostr(ch0_dim, buffer, 0, 1), 0);
+	pcd8544_write_char('/', 0);
+	pcd8544_write_string(itostr(ch1_dim, buffer, 0, 1), 0);
 	if (is_daytime()) {
 		pcd8544_set_cursor(42, 0);
-		pcd8544_write_char('*', 1);
+		pcd8544_write_char('*', 0);
 	}
 	pcd8544_set_cursor(54, 0);
 	itostr(time_hour, buffer, 0, 2);
 	buffer[2] = time_sec % 2 ? ':' : ' ';
 	itostr(time_min, &buffer[3], 0, 2);
-	pcd8544_write_string(buffer, 1);
-	switch (sensor) {
-		case 0:
-			pcd8544_set_cursor(temperature < 0 ? 0 : 12, 8);
-			pcd8544_write_string(itostr(temperature, buffer, 1, 2), 2);
-			pcd8544_write_string_P("\x7f\x43", 2);
-			pcd8544_set_cursor(12, 24);
-			pcd8544_write_string(itostr(humidity, buffer, 1, 2), 2);
-			pcd8544_write_char('%', 2);
-			break;
-		case 1:
-			pcd8544_write_string_P("\nNo response", 1);
-			break;
-		case 2:
-			pcd8544_write_string_P("\nCRC error", 1);
+	pcd8544_write_string(buffer, 0);
+	if (sensor1 != 1) {
+		pcd8544_set_font(Font6x14B);
+		pcd8544_set_cursor(0, 8);
+		pcd8544_write_string(sensor0 ? strcpy_P(buffer, PSTR("--")) : itostr(temperature0, buffer, 1, 2), 0);
+		pcd8544_write_char('/', 0);
+		pcd8544_write_string(sensor1 ? strcpy_P(buffer, PSTR("--")) : itostr(temperature1, buffer, 1, 2), 0);
+		pcd8544_write_string_P("\x7f\x43\n", 0);
+		pcd8544_write_string(sensor0 ? strcpy_P(buffer, PSTR("--")) : itostr(humidity0, buffer, 1, 2), 0);
+		pcd8544_write_char('/', 0);
+		pcd8544_write_string(sensor1 ? strcpy_P(buffer, PSTR("--")) : itostr(humidity1, buffer, 1, 2), 0);
+		pcd8544_write_char('%', 0);
+		pcd8544_set_font(Font5x7);
+	} else {
+		switch (sensor0) {
+			case 0:
+				pcd8544_set_font(Font10x15B);
+				pcd8544_set_cursor(temperature0 < 0 ? 0 : 12, 8);
+				pcd8544_write_string(itostr(temperature0, buffer, 1, 2), 0);
+				pcd8544_write_string_P("\x7f\x43", 0);
+				pcd8544_set_cursor(12, 24);
+				pcd8544_write_string(itostr(humidity0, buffer, 1, 2), 0);
+				pcd8544_write_char('%', 0);
+				pcd8544_set_font(Font5x7);
+				break;
+			case 1:
+				pcd8544_write_string_P("\nNo response", 0);
+				break;
+			case 2:
+				pcd8544_write_string_P("\nCRC error", 0);
+		}
 	}
 	pcd8544_set_cursor(0, 40);
-	pcd8544_write_string_P("Set Ch Pid Lcd", 1);
+	pcd8544_write_string_P("Set Ch Pid Lcd", 0);
 	pcd8544_update();
 	return HOME;
 }
@@ -373,7 +392,7 @@ static uint8_t setup(void) {
 		}
 	}
 	pcd8544_clear();
-	uint8_t inv = item == 1 ? 129 : 1;
+	bool inv = item == 1;
 	pcd8544_write_string_P("Time ", inv);
 	memset(buffer, ' ', 8);
 	if (!(select == 1 && sub == 1 && blink)) itostr(time_hour, buffer, 0, 2);
@@ -383,7 +402,7 @@ static uint8_t setup(void) {
 	if (!(select == 1 && sub == 3 && blink)) itostr(time_sec, &buffer[6], 0, 2);
 	buffer[8] = 0;
 	pcd8544_write_string(buffer, inv);
-	inv = item == 2 ? 129 : 1;
+	inv = item == 2;
 	pcd8544_write_string_P("\nStart ", inv);
 	memset(buffer, ' ', 8);
 	if (!(select == 2 && sub == 1 && blink)) itostr(start_hour, buffer, 0, 2);
@@ -391,7 +410,7 @@ static uint8_t setup(void) {
 	if (!(select == 2 && sub == 2 && blink)) itostr(start_min, &buffer[3], 0, 2);
 	buffer[5] = 0;
 	pcd8544_write_string(buffer, inv);
-	inv = item == 3 ? 129 : 1;
+	inv = item == 3;
 	pcd8544_write_string_P("\nLength ", inv);
 	memset(buffer, ' ', 5);
 	if (!(select == 3 && sub == 1 && blink)) itostr(length_hour, buffer, 0, 2);
@@ -399,19 +418,19 @@ static uint8_t setup(void) {
 	if (!(select == 3 && sub == 2 && blink)) itostr(length_min, &buffer[3], 0, 2);
 	buffer[5] = 0;
 	pcd8544_write_string(buffer, inv);
-	inv = item == 4 ? 129 : 1;
+	inv = item == 4;
 	pcd8544_write_string_P("\nMin temp ", inv);
 	itostr(min_temp, buffer, 1, 2);
 	if (select == 4) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 5 ? 129 : 1;
+	inv = item == 5;
 	pcd8544_set_cursor(0, 32);
 	pcd8544_write_string_P("Max temp ", inv);
 	itostr(max_temp, buffer, 1, 2);
 	if (select == 5) blink_buffer();
 	pcd8544_write_string(buffer, inv);
 	pcd8544_set_cursor(0, 40);
-	pcd8544_write_string_p(str_buttons, 1);
+	pcd8544_write_string_p(str_buttons, 0);
 	pcd8544_update();
 	return SETUP;
 }
@@ -512,7 +531,7 @@ static uint8_t channel(void) {
 		}
 	}
 	pcd8544_clear();
-	uint8_t inv = item == 1 ? 129 : 1;
+	bool inv = item == 1;
 	pcd8544_write_string_P("Ch 0 ", inv);
 	if (ch0_auto)
 		strcpy_P(buffer, str_auto);
@@ -520,12 +539,12 @@ static uint8_t channel(void) {
 		itostr(ch0_dim, buffer, 0, 1);
 	if (select == 1) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 2 ? 129 : 1;
+	inv = item == 2;
 	pcd8544_write_string_P("\nCh 0 ", inv);
 	strcpy_P(buffer, ch0_on_off ? str_on_off : str_dimming);
 	if (select == 2) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 3 ? 129 : 1;
+	inv = item == 3;
 	pcd8544_write_string_P("\nCh 1 ", inv);
 	if (ch1_auto)
 		strcpy_P(buffer, str_auto);
@@ -533,18 +552,18 @@ static uint8_t channel(void) {
 		itostr(ch1_dim, buffer, 0, 1);
 	if (select == 3) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 4 ? 129 : 1;
+	inv = item == 4;
 	pcd8544_write_string_P("\nCh 1 ", inv);
 	strcpy_P(buffer, ch1_on_off ? str_on_off : str_dimming);
 	if (select == 4) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 5 ? 129 : 1;
+	inv = item == 5;
 	pcd8544_write_string_P("\nThreshold ", inv);
 	itostr(on_off_thres, buffer, 0, 1);
 	if (select == 5) blink_buffer();
 	pcd8544_write_string(buffer, inv);
 	pcd8544_set_cursor(0, 40);
-	pcd8544_write_string_p(str_buttons, 1);
+	pcd8544_write_string_p(str_buttons, 0);
 	pcd8544_update();
 	return CHANNEL;
 }
@@ -603,29 +622,29 @@ static uint8_t kval(void) {
 		}
 	}
 	pcd8544_clear();
-	uint8_t inv = item == 1 ? 129 : 1;
+	bool inv = item == 1;
 	pcd8544_write_string_P("Kp ", inv);
 	itostr(Kp, buffer, 2, 3);
 	if (select == 1) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 2 ? 129 : 1;
+	inv = item == 2;
 	pcd8544_write_string_P("\nKi ", inv);
 	itostr(Ki, buffer, 2, 3);
 	if (select == 2) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 3 ? 129 : 1;
+	inv = item == 3;
 	pcd8544_write_string_P("\nKd ", inv);
 	itostr(Kd, buffer, 2, 3);
 	if (select == 3) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 4 ? 129 : 1;
+	inv = item == 4;
 	pcd8544_write_string_P("\ndT ", inv);
 	itostr(dT, buffer, 0, 1);
 	if (select == 4) blink_buffer();
 	pcd8544_write_string(buffer, inv);
 	pcd8544_write_char('s', inv);
 	pcd8544_set_cursor(0, 40);
-	pcd8544_write_string_p(str_buttons, 1);
+	pcd8544_write_string_p(str_buttons, 0);
 	pcd8544_update();
 	return KVAL;
 }
@@ -674,7 +693,7 @@ static uint8_t etc(void) {
 		}
 	}
 	pcd8544_clear();
-	uint8_t inv = item == 1 ? 129 : 1;
+	bool inv = item == 1;
 	pcd8544_write_string_P("Backlight ", inv);
 	if (bl_mode == ON)
 		strcpy_P(buffer, PSTR("On"));
@@ -684,33 +703,31 @@ static uint8_t etc(void) {
 		strcpy_P(buffer, PSTR("Off"));
 	if (select == 1) blink_buffer();
 	pcd8544_write_string(buffer, inv);
-	inv = item == 2 ? 129 : 1;
+	inv = item == 2;
 	pcd8544_set_cursor(0, 8);
 	pcd8544_write_string_P("Contrast ", inv);
 	itostr(contrast, buffer, 0, 1);
 	if (select == 2) blink_buffer();
 	pcd8544_write_string(buffer, inv);
 	pcd8544_set_cursor(0, 40);
-	pcd8544_write_string_p(str_buttons, 1);
+	pcd8544_write_string_p(str_buttons, 0);
 	pcd8544_update();
 	return ETC;
 }
 
-static int16_t pid(int16_t input, int16_t setpoint) {
-	static int16_t lastInput = 0;
-	static int16_t outputSum = 0;
+static int16_t pid(int16_t input, int16_t setpoint, int16_t *lastInput, int16_t *outputSum) {
 	int16_t output = 0;
 	int16_t error = setpoint - input;
-	int16_t dInput = input - lastInput;
-	lastInput = input;
-	outputSum += Ki * 2 * error;
+	int16_t dInput = input - *lastInput;
+	*lastInput = input;
+	*outputSum += Ki * 2 * error;
 #ifdef P_ON_M
-	outputSum -= Kp * dInput;  // Proportional on Measurement
+	*outputSum -= Kp * dInput;  // Proportional on Measurement
 #else
 	output = Kp * error;  // Proportional on Error
 #endif
-	outputSum = constrain(outputSum, 0, DIM_STEPS * 100);
-	output += outputSum - Kd / 2 * dInput;  // Derivative on Measurement
+	*outputSum = constrain(*outputSum, 0, DIM_STEPS * 100);
+	output += *outputSum - Kd / 2 * dInput;  // Derivative on Measurement
 	output /= 100;
 	return constrain(output, 0, DIM_STEPS);
 }
@@ -740,16 +757,17 @@ static void eeprom_init(void) {
 
 int main(void) {
 	uint8_t view = HOME, prev_on_off = 0;
+	int16_t lastInput0 = 0, lastInput1 = 0;
+	int16_t outputSum0 = 0, outputSum1 = 0;
 	eeprom_init();
 	pcd8544_init();
+	pcd8544_set_font(Font5x7);
 	pcd8544_led_on();
-	pcd8544_write_string_P("Calibrating", 1);
+	pcd8544_write_string_P("Calibrating", 0);
 	pcd8544_update();
 	calibrate();
 	pcd8544_clear();
 	pcd8544_update();
-    uart_init(UART_BAUD_SELECT(9600, F_CPU));
-	uart_puts_P("Ok\r\n");
 	button_init();
 	timer0_init();
 	timer1_init();
@@ -767,22 +785,33 @@ int main(void) {
 			pcd8544_led_off();
 		if (sample_delay == 0) {
 			sample_delay = dT;
-			if ((sensor = am2320_get(&humidity, &temperature))) continue;
 			int16_t setpoint = is_daytime() ? max_temp : min_temp;
-			uint8_t output = pid(temperature, setpoint);
+			i2c_select(0);
+			if ((sensor0 = aht20_get(&humidity0, &temperature0)) == 1) {
+				sensor0 = am2320_get(&humidity0, &temperature0);
+			}
+			uint8_t output = pid(temperature0, setpoint, &lastInput0, &outputSum0);
 			uint8_t on_off = output > on_off_thres ? DIM_STEPS : 0;
 			if (on_off != prev_on_off) {
 				prev_on_off = on_off;
 				on_off_delay = ON_OFF_DELAY;
 			}
-			if (ch0_auto) {
+			if (ch0_auto && sensor0 == 0) {
 				if (ch0_on_off) {
 					if (on_off_delay == 0) ch0_dim = on_off;
 				} else {
 					ch0_dim = output;
 				}
 			}
-			if (ch1_auto) {
+			i2c_select(1);
+			if ((sensor1 = aht20_get(&humidity1, &temperature1)) == 1) {
+				sensor1 = am2320_get(&humidity1, &temperature1);
+			}
+			if (sensor1 == 0) {
+				output = pid(temperature1, setpoint, &lastInput1, &outputSum1);
+				on_off = output > on_off_thres ? DIM_STEPS : 0;
+			}
+			if (ch1_auto && (sensor0 == 0 || sensor1 == 0)) {
 				if (ch1_on_off) {
 					if (on_off_delay == 0) ch1_dim = on_off;
 				} else {

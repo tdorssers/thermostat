@@ -4,13 +4,15 @@
 
 ## Overview
 
-This is a graphical menu configured dimming thermostat with two output channels. Each channel can also switch between on and off. The start of daytime and length of day are used to determine day and night temperatures. The dimming hardware uses zero-cross detection which gives a positive edge at the end of a half sine wave and a negative edge at the start of a half sine wave on the ICP1 pin. The OC1x pins connect to photo-TRIACs that drive the power TRIACs to control the leading edge.
+This is a graphical menu configurable AC dimming thermostat with two output channels. Each channel be set to on/off switching. Up to two temperature sensors are detected automatically. Each channel is controlled individually when using two sensors. Start of daytime and length of day are used to determine day and night temperatures.
+
+The dimming hardware uses zero-cross detection which gives a positive edge at the end of a half sine wave and a negative edge at the start of a half sine wave on the ICP1 pin. The OC1x pins connect to photo-TRIACs that drive the power TRIACs to control the leading edge.
 
 ## Hardware
 
 * ATmega328P @ 8 MHz
 * PCD8544 LCD controller
-* AM2320 temperature and humidity sensor
+* AHT15/AHT20/AHT21/AHT25 or AM2320 temperature and humidity sensor
 
 ## Schematic
 
