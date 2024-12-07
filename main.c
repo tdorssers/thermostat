@@ -43,56 +43,84 @@
 
 char buffer[15];
 uint8_t EEMEM nv_magic;
+
+// AC phase control globals
+#define DIM_STEPS 50
+uint16_t next_ocr1a = 0, next_ocr1b = 0;
 uint8_t ch0_dim = 0, ch1_dim = 0;
 bool ch0_auto = true, ch1_auto = true;
 bool ch0_on_off = false, ch1_on_off = false;
 uint8_t EEMEM nv_ch0_dim, nv_ch1_dim;
 uint8_t EEMEM nv_ch0_auto, nv_ch1_auto;
 uint8_t EEMEM nv_ch0_on_off, nv_ch1_on_off;
-#define DIM_STEPS 50
-uint16_t next_ocr1a = 0, next_ocr1b = 0;
+
+// Button polling globals
 volatile bool blink = false;
 volatile bool button[4];
 volatile uint8_t bl_delay = 0;
 #define BL_DELAY 30
-enum {HOME, SETUP, CHANNEL, KVAL, ETC};
-uint16_t humidity0, humidity1;
-int16_t temperature0, temperature1;
-uint8_t sensor0 = 0, sensor1 = 0;
+
+// Time keeping globals
 uint8_t time_sec = 0, time_min = 0, time_hour = 0;
-uint8_t start_min = 0, start_hour = 8, length_min = 0, length_hour = 10;
-uint8_t EEMEM nv_start_min, nv_start_hour, nv_length_min, nv_length_hour;
-int16_t min_temp = 200, max_temp = 250;
-uint16_t EEMEM nv_min_temp, nv_max_temp;
-const char str_auto[] PROGMEM = "Auto";
-const char str_on_off[] PROGMEM = "On/Off";
-const char str_dimming[] PROGMEM = "Dimming";
-const char str_buttons[] PROGMEM = "Back Sel Up Dn";
-#define P_ON_M
-uint8_t Kp = 90, Ki = 1, Kd = 10, dT = 2;
-uint8_t EEMEM nvKp, nvKi, nvKd, nvdT;
 volatile uint8_t sample_delay = 0, on_off_delay = 0;
 #define ON_OFF_DELAY 30
 uint8_t on_off_thres = 15;
 uint8_t EEMEM nv_on_off_thres;
+
+// Sensor globals
+uint16_t humidity0, humidity1;
+int16_t temperature0, temperature1;
+uint8_t sensor0 = 0, sensor1 = 0;
+
+// Setting globals
+uint8_t start_min = 0, start_hour = 8, length_min = 0, length_hour = 10;
+uint8_t EEMEM nv_start_min, nv_start_hour, nv_length_min, nv_length_hour;
+int16_t min_temp = 200, max_temp = 250;
+uint16_t EEMEM nv_min_temp, nv_max_temp;
+
+// Menu globals
+enum {HOME, SETUP, CHANNEL, KVAL, ETC};
+const char str_auto[] PROGMEM = "Auto";
+const char str_on_off[] PROGMEM = "On/Off";
+const char str_dimming[] PROGMEM = "Dimming";
+const char str_buttons[] PROGMEM = "Back Sel Up Dn";
+
+// PID control globals
+#define P_ON_M
+uint8_t Kp = 90, Ki = 1, Kd = 10, dT = 2;
+uint8_t EEMEM nvKp, nvKi, nvKd, nvdT;
+
+// LCD globals
 enum {OFF, ON, AUTO};
 uint8_t bl_mode = AUTO, contrast = 60;
 uint8_t EEMEM nv_bl_mode, nv_contrast;
+uint8_t new_ocr0a = 0;
 
+// Function macros
 #define button_init() PORTC |= _BV(PC0) | _BV(PC1) | _BV(PC2) | _BV(PC3)
 #define constrain(amt,low,high) ((amt)<(low)?(low):((amt)>(high)?(high):(amt)))
 
+// Button polling and LED control
 static void timer0_init(void) {
 	TCCR0A = 0;           // Normal operation
 	TCCR0B = _BV(CS00) | _BV(CS01);  // Prescaler /64, TC0 overflows every 2048 us
 	TCNT0 = 0;            // Reset timer
 	TIMSK0 = _BV(TOIE0);  // Timer0 Overflow Interrupt Enable
+	OCR0A = 255;          // Maximum intensity
 }
 
 ISR(TIMER0_OVF_vect) {
 	static uint8_t count = 0, push[4];  // These overflow every 524 ms
 	static bool hold[4];
 	if (++count == 0) blink = !blink;
+	// Fade to new intensity
+	uint8_t cur_ocr0a = OCR0A;
+	if (cur_ocr0a > new_ocr0a) cur_ocr0a--;
+	if (cur_ocr0a < new_ocr0a) cur_ocr0a++;
+	// Non-inverting fast PWM on OC0A, only if needed
+	TCCR0A = (cur_ocr0a ? _BV(COM0A1) | _BV(WGM01) | _BV(WGM00) : 0);
+	OCR0A = cur_ocr0a;
+	// Button polling
 	for (uint8_t pin = PC0; pin < PC4; pin++) {
 		if bit_is_clear(PINC, pin) {
 			push[pin]++;
@@ -109,6 +137,7 @@ ISR(TIMER0_OVF_vect) {
 	}
 }
 
+// Time keeping
 static void timer2_init(void) {
 	ASSR |= _BV(AS2);     // Set Timer/Counter2 clock source to 32,768 kHz crystal
 	TCNT2 = 0;            // Reset timer
@@ -133,6 +162,7 @@ ISR(TIMER2_OVF_vect) {
 	if (on_off_delay) on_off_delay--;
 }
 
+// Internal R/C oscilator calibration
 static void calibrate(void) {
 	uint8_t cycles = 128;
 	ASSR |= _BV(AS2);
@@ -161,6 +191,7 @@ static void calibrate(void) {
 	} while(--cycles);
 }
 
+// AC phase control
 static void timer1_init(void) {
 	TCCR1A = 0; // Normal operation
 	// Input capture noise cancel, positive edge, /8 prescaler
@@ -225,6 +256,7 @@ static bool is_daytime(void) {
 	return now >= start && now < start + length_hour * 60 + length_min;
 }
 
+// Home screen
 static uint8_t home(void) {
 	for (uint8_t i = 0; i < 4; i++) {
 		if (button[i]) {
@@ -309,6 +341,7 @@ static void blink_buffer(void) {
 	if (blink) memset(buffer, ' ', strlen(buffer));
 }
 
+// Setup screen
 static uint8_t setup(void) {
 	static uint8_t item = 1, select = 0, sub = 0;
 	if (button[3]) {  // Back
@@ -435,6 +468,7 @@ static uint8_t setup(void) {
 	return SETUP;
 }
 
+// Channel screen
 static uint8_t channel(void) {
 	static uint8_t item = 1, select = 0;
 	if (button[3]) {  // Back
@@ -568,6 +602,7 @@ static uint8_t channel(void) {
 	return CHANNEL;
 }
 
+// PID control K values screen
 static uint8_t kval(void) {
 	static uint8_t item = 1, select = 0;
 	if (button[3]) {  // Back
@@ -649,6 +684,7 @@ static uint8_t kval(void) {
 	return KVAL;
 }
 
+// LCD screen
 static uint8_t etc(void) {
 	static uint8_t item = 1, select = 0;
 	if (button[3]) {  // Back
@@ -715,6 +751,7 @@ static uint8_t etc(void) {
 	return ETC;
 }
 
+// PID control
 static int16_t pid(int16_t input, int16_t setpoint, int16_t *lastInput, int16_t *outputSum) {
 	int16_t output = 0;
 	int16_t error = setpoint - input;
@@ -759,6 +796,7 @@ int main(void) {
 	uint8_t view = HOME, prev_on_off = 0;
 	int16_t lastInput0 = 0, lastInput1 = 0;
 	int16_t outputSum0 = 0, outputSum1 = 0;
+	i2c_init();
 	eeprom_init();
 	pcd8544_init();
 	pcd8544_set_font(Font5x7);
@@ -772,6 +810,7 @@ int main(void) {
 	timer0_init();
 	timer1_init();
 	timer2_init();
+	pcd8544_led_off();
 	// Main loop
     while (1) {
 		if (view == HOME) view = home();
@@ -779,10 +818,7 @@ int main(void) {
 		if (view == CHANNEL) view = channel();
 		if (view == KVAL) view = kval();
 		if (view == ETC) view = etc();
-		if (bl_mode == ON || (bl_mode == AUTO && bl_delay))
-			pcd8544_led_on();
-		else
-			pcd8544_led_off();
+		new_ocr0a = (bl_mode == ON || (bl_mode == AUTO && bl_delay)) ? 255 : 0;
 		if (sample_delay == 0) {
 			sample_delay = dT;
 			int16_t setpoint = is_daytime() ? max_temp : min_temp;

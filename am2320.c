@@ -10,19 +10,18 @@
 #include <util/delay.h>
 #include <util/crc16.h>
 #include "am2320.h"
-#include "i2cmaster.h"
+#include "i2c.h"
 
 // Returns 0 for success, 1 for no response, 2 for crc error
 uint8_t am2320_get(uint16_t *humid, int16_t *temp) {
 	uint8_t buffer[8];
-	i2c_init();
 	// Sensor wake up
 	i2c_start(AM2320_ADDR + I2C_WRITE);
 	_delay_us(800);
 	i2c_stop();
 	// Read temperature and humidity
 	if (i2c_start(AM2320_ADDR + I2C_WRITE)) {
-		TWCR = 0;
+		i2c_init();
 		return 1;
 	}
 	i2c_write(AM2320_CMD_READREG);
@@ -39,16 +38,14 @@ uint8_t am2320_get(uint16_t *humid, int16_t *temp) {
 	}
 	buffer[7] = i2c_readNak();
 	i2c_stop();
+	// Reinitialize TWI in case of error condition
+	i2c_init();
 	// Check CRC
-	if (((buffer[7] << 8) | buffer[6]) != crc) {
-		TWCR = 0;
-		return 2;
-	}
+	if (((buffer[7] << 8) | buffer[6]) != crc) return 2;
 	*humid = (buffer[2] << 8) | buffer[3];
 	*temp = ((buffer[4] & 0x7F) << 8) | buffer[5];
 	// Check sign bit
 	if (buffer[4] & 0x80)
 		*temp *= -1;
-	TWCR = 0;
 	return 0;
 }
